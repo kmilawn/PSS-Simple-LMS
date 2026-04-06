@@ -1,0 +1,8 @@
+"__pycache__/" 
+"*.pyc" 
+".env" 
+"staticfiles/" 
+"media/" 
+"*.log" 
+".DS_Store" 
+".vscode/" 

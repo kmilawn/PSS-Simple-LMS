@@ -1,0 +1,46 @@
+[
+  {
+    "model": "core.user",
+    "pk": 1,
+    "fields": {
+      "username": "admin",
+      "password": "pbkdf2_sha256$600000$abc123def456$hash",
+      "email": "admin@lms.com",
+      "role": "admin",
+      "is_staff": true,
+      "is_superuser": true,
+      "first_name": "Super",
+      "last_name": "Admin"
+    }
+  },
+  {
+    "model": "core.category",
+    "pk": 1,
+    "fields": {
+      "name": "Programming",
+      "slug": "programming",
+      "description": "Programming and Development courses",
+      "parent": null
+    }
+  },
+  {
+    "model": "core.category",
+    "pk": 2,
+    "fields": {
+      "name": "Web Development",
+      "slug": "web-development",
+      "description": "Web development technologies",
+      "parent": 1
+    }
+  },
+  {
+    "model": "core.category",
+    "pk": 3,
+    "fields": {
+      "name": "Data Science",
+      "slug": "data-science",
+      "description": "Data Science and Machine Learning",
+      "parent": 1
+    }
+  }
+]
