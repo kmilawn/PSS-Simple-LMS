@@ -9,24 +9,17 @@ from django.utils import timezone
 
 class CourseQuerySet(models.QuerySet):
     def for_listing(self):
-        """Optimized query untuk list view dengan select_related dan prefetch_related"""
+        """Optimized query untuk list view"""
         return self.select_related('category', 'instructor').prefetch_related(
             'lessons', 
             'enrollments'
         ).annotate(
             lessons_count=Count('lessons', distinct=True),
-            students_enrolled=Count('enrollments', distinct=True),
-            average_progress=Avg('enrollments__progress_percentage')
+            students_enrolled=Count('enrollments', distinct=True)
         )
     
     def published(self):
         return self.filter(is_published=True)
-    
-    def by_category(self, category_id):
-        return self.filter(category_id=category_id)
-    
-    def by_instructor(self, instructor_id):
-        return self.filter(instructor_id=instructor_id)
     
     def search(self, query):
         return self.filter(
@@ -48,7 +41,7 @@ class CourseManager(models.Manager):
 
 class EnrollmentQuerySet(models.QuerySet):
     def for_student_dashboard(self, student_id):
-        """Optimized query untuk student dashboard dengan progress"""
+        """Optimized query untuk student dashboard"""
         return self.select_related(
             'course', 
             'course__instructor', 
@@ -61,19 +54,8 @@ class EnrollmentQuerySet(models.QuerySet):
             is_active=True
         ).annotate(
             total_lessons=Count('course__lessons', distinct=True),
-            completed_lessons=Count('progress', filter=Q(progress__is_completed=True), distinct=True),
-            progress_percentage=Case(
-                When(total_lessons=0, then=Value(0.0)),
-                default=F('completed_lessons') * 100.0 / F('total_lessons'),
-                output_field=models.FloatField()
-            )
+            completed_lessons=Count('progress', filter=Q(progress__is_completed=True), distinct=True)
         )
-    
-    def active(self):
-        return self.filter(is_active=True)
-    
-    def completed(self):
-        return self.filter(completed_at__isnull=False)
 
 class EnrollmentManager(models.Manager):
     def get_queryset(self):
@@ -113,10 +95,6 @@ class User(AbstractUser):
     @property
     def is_student(self):
         return self.role == 'student'
-    
-    @property
-    def enrolled_courses(self):
-        return self.enrollments.filter(is_active=True)
 
 
 class Category(models.Model):
@@ -141,12 +119,6 @@ class Category(models.Model):
         if self.parent:
             return f"{self.parent.name} > {self.name}"
         return self.name
-    
-    @property
-    def full_path(self):
-        if self.parent:
-            return f"{self.parent.full_path} > {self.name}"
-        return self.name
 
 
 class Course(models.Model):
@@ -165,8 +137,7 @@ class Course(models.Model):
     instructor = models.ForeignKey(
         User, 
         on_delete=models.CASCADE, 
-        related_name='courses_taught',
-        limit_choices_to={'role__in': ['admin', 'instructor']}
+        related_name='courses_taught'
     )
     category = models.ForeignKey(
         Category, 
@@ -185,25 +156,14 @@ class Course(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
     published_at = models.DateTimeField(blank=True, null=True)
     
-    # Custom Manager
     objects = CourseManager()
     
     class Meta:
         db_table = 'courses'
         ordering = ['-created_at']
-        indexes = [
-            models.Index(fields=['slug']),
-            models.Index(fields=['instructor', 'is_published']),
-            models.Index(fields=['category', 'is_published']),
-        ]
     
     def __str__(self):
         return self.title
-    
-    def save(self, *args, **kwargs):
-        if self.is_published and not self.published_at:
-            self.published_at = timezone.now()
-        super().save(*args, **kwargs)
     
     @property
     def total_lessons(self):
@@ -212,6 +172,10 @@ class Course(models.Model):
     @property
     def total_enrollments(self):
         return self.enrollments.filter(is_active=True).count()
+    
+    @property
+    def average_rating(self):
+        return self.reviews.aggregate(Avg('rating'))['rating__avg'] or 0
 
 
 class Lesson(models.Model):
@@ -235,9 +199,6 @@ class Lesson(models.Model):
         db_table = 'lessons'
         ordering = ['order']
         unique_together = ['course', 'order']
-        indexes = [
-            models.Index(fields=['course', 'order']),
-        ]
     
     def __str__(self):
         return f"{self.course.title} - Lesson {self.order}: {self.title}"
@@ -247,8 +208,7 @@ class Enrollment(models.Model):
     student = models.ForeignKey(
         User, 
         on_delete=models.CASCADE, 
-        related_name='enrollments',
-        limit_choices_to={'role': 'student'}
+        related_name='enrollments'
     )
     course = models.ForeignKey(
         Course, 
@@ -259,16 +219,11 @@ class Enrollment(models.Model):
     completed_at = models.DateTimeField(blank=True, null=True)
     is_active = models.BooleanField(default=True)
     
-    # Custom Manager
     objects = EnrollmentManager()
     
     class Meta:
         db_table = 'enrollments'
         unique_together = ['student', 'course']
-        indexes = [
-            models.Index(fields=['student', 'course']),
-            models.Index(fields=['is_active']),
-        ]
     
     def __str__(self):
         return f"{self.student.username} enrolled in {self.course.title}"
@@ -307,20 +262,10 @@ class Progress(models.Model):
     class Meta:
         db_table = 'progress'
         unique_together = ['enrollment', 'lesson']
-        indexes = [
-            models.Index(fields=['enrollment', 'is_completed']),
-            models.Index(fields=['lesson', 'is_completed']),
-        ]
     
     def __str__(self):
         status = "Completed" if self.is_completed else "In Progress"
         return f"{self.enrollment.student.username} - {self.lesson.title}: {status}"
-    
-    def mark_completed(self):
-        if not self.is_completed:
-            self.is_completed = True
-            self.completed_at = timezone.now()
-            self.save()
 
 
 class Review(models.Model):

@@ -7,3 +7,6 @@ whitenoise==6.6.0
 Pillow==10.1.0
 django-debug-toolbar==4.2.0
 factory-boy==3.3.0
+django-ninja==1.1.0
+django-ninja-jwt==5.1.0
+python-multipart==0.0.6
