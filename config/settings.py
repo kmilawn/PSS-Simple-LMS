@@ -38,6 +38,9 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
+
+    'django_celery_beat',
+
     'core',
 ]
 
@@ -50,6 +53,7 @@ MIDDLEWARE = [
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
     'whitenoise.middleware.WhiteNoiseMiddleware',
+    'core.middleware.RateLimitMiddleware',
 ]
 
 ROOT_URLCONF = 'config.urls'
@@ -119,6 +123,19 @@ DATABASES = {
     }
 }
 
+# ====================
+# REDIS CACHE
+# ====================
+
+CACHES = {
+    "default": {
+        "BACKEND": "django_redis.cache.RedisCache",
+        "LOCATION": "redis://redis:6379/1",
+        "OPTIONS": {
+            "CLIENT_CLASS": "django_redis.client.DefaultClient",
+        }
+    }
+}
 
 # Password validation
 # https://docs.djangoproject.com/en/5.2/ref/settings/#auth-password-validators
@@ -180,4 +197,58 @@ if DEBUG:
     MIDDLEWARE += ['debug_toolbar.middleware.DebugToolbarMiddleware']
     INTERNAL_IPS = ['127.0.0.1', 'localhost']
 
-    
+# ====================
+# CELERY
+# ====================
+
+CELERY_BROKER_URL = "amqp://guest:guest@rabbitmq:5672//"
+
+CELERY_RESULT_BACKEND = "redis://redis:6379/0"
+
+CELERY_ACCEPT_CONTENT = ['json']
+
+CELERY_TASK_SERIALIZER = 'json'
+
+CELERY_RESULT_SERIALIZER = 'json'
+
+CELERY_TIMEZONE = 'UTC'
+
+# ====================
+# MONGODB
+# ====================
+
+MONGODB_SETTINGS = {
+    "db": "simple_lms_logs",
+    "host": "mongodb",
+    "port": 27017
+}
+
+CACHES = {
+    "default": {
+        "BACKEND":
+        "django_redis.cache.RedisCache",
+
+        "LOCATION":
+        "redis://redis:6379/1",
+
+        "OPTIONS": {
+            "CLIENT_CLASS":
+            "django_redis.client.DefaultClient",
+        }
+    }
+}
+
+CELERY_BROKER_URL = "amqp://guest:guest@rabbitmq:5672//"
+
+CELERY_RESULT_BACKEND = "redis://redis:6379/0"
+
+CELERY_BEAT_SCHEDULE = {
+    "update-course-statistics": {
+        "task":
+        "core.tasks.update_course_statistics",
+
+        "schedule":
+        3600,
+    }
+}
+

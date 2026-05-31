@@ -2,7 +2,7 @@ from ninja import Schema, Field
 from typing import Optional, List
 from datetime import datetime
 from decimal import Decimal
-from pydantic import field_validator
+from pydantic import validator
 
 # ==================== AUTH SCHEMAS ====================
 
@@ -12,12 +12,15 @@ class RegisterInput(Schema):
     password: str = Field(..., min_length=6)
     first_name: Optional[str] = None
     last_name: Optional[str] = None
-    role: str = Field(default='student', pattern='^(admin|instructor|student)$')
-    
-    @field_validator('email')
+    role: str = Field(
+        default="student",
+        regex="^(admin|instructor|student)$"
+    )
+
+    @validator("email", allow_reuse=True)
     def validate_email(cls, v):
-        if '@' not in v:
-            raise ValueError('Invalid email address')
+        if "@" not in v:
+            raise ValueError("Invalid email address")
         return v
 
 class LoginInput(Schema):
@@ -123,7 +126,7 @@ class CourseInput(Schema):
     description: str = Field(..., min_length=10)
     short_description: Optional[str] = None
     category_id: Optional[int] = None
-    level: str = Field(default='beginner', pattern='^(beginner|intermediate|advanced)$')
+    level: str = Field(default='beginner', regex='^(beginner|intermediate|advanced)$')
     price: Decimal = Field(default=0, ge=0, le=999999)
     is_published: bool = False
     is_featured: bool = False
@@ -134,7 +137,7 @@ class CourseUpdateInput(Schema):
     description: Optional[str] = Field(None, min_length=10)
     short_description: Optional[str] = None
     category_id: Optional[int] = None
-    level: Optional[str] = Field(None, pattern='^(beginner|intermediate|advanced)$')
+    level: Optional[str] = Field(None, regex='^(beginner|intermediate|advanced)$')
     price: Optional[Decimal] = Field(None, ge=0, le=999999)
     is_published: Optional[bool] = None
     is_featured: Optional[bool] = None
@@ -182,4 +185,4 @@ class PaginatedResponse(Schema):
     total_pages: int
 
 # Update forward references
-CategoryOutput.model_rebuild()
+CategoryOutput.update_forward_refs()

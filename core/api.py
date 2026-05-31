@@ -7,7 +7,17 @@ from django.shortcuts import get_object_or_404
 from django.db.models import Count, Avg, Q
 from typing import List, Optional
 from datetime import datetime
+from django.core.cache import cache
 
+from .mongodb import (
+    activity_logs,
+    learning_analytics
+)
+
+from .tasks import (
+    send_enrollment_email,
+    generate_certificate
+)
 from . import schemas
 from .models import User, Category, Course, Lesson, Enrollment, Progress
 
@@ -158,61 +168,98 @@ def update_me(request, payload: schemas.UserUpdateInput):
 
 @api.get("/courses", response=List[schemas.CourseOutput])
 def list_courses(
-    request, 
+    request,
     category_id: Optional[int] = None,
     level: Optional[str] = None,
     search: Optional[str] = None,
     featured: Optional[bool] = None
 ):
-    """List all published courses with filters"""
-    courses = Course.objects.filter(is_published=True).select_related('category', 'instructor')
-    
+    """
+    List all published courses with Redis Cache
+    """
+
+    cache_key = f"course_list_{category_id}_{level}_{search}_{featured}"
+
+    cached_data = cache.get(cache_key)
+
+    if cached_data:
+        return cached_data
+
+    courses = Course.objects.filter(
+        is_published=True
+    ).select_related(
+        'category',
+        'instructor'
+    )
+
     if category_id:
         courses = courses.filter(category_id=category_id)
+
     if level:
         courses = courses.filter(level=level)
+
     if featured:
         courses = courses.filter(is_featured=True)
+
     if search:
         courses = courses.filter(
-            Q(title__icontains=search) | 
+            Q(title__icontains=search) |
             Q(description__icontains=search)
         )
-    
-    # Manual annotation to avoid errors
+
     result = []
+
     for course in courses[:50]:
-        result.append(schemas.CourseOutput(
-            id=course.id,
-            title=course.title,
-            slug=course.slug,
-            description=course.description,
-            short_description=course.short_description or '',
-            thumbnail=course.thumbnail.url if course.thumbnail else None,
-            instructor=schemas.InstructorOutput(
-                id=course.instructor.id,
-                username=course.instructor.username,
-                first_name=course.instructor.first_name,
-                last_name=course.instructor.last_name
-            ),
-            category_id=course.category.id if course.category else None,
-            category_name=course.category.name if course.category else None,
-            level=course.level,
-            price=course.price,
-            is_published=course.is_published,
-            is_featured=course.is_featured,
-            duration_hours=course.duration_hours,
-            lessons_count=course.lessons.count(),
-            students_enrolled=course.enrollments.filter(is_active=True).count(),
-            average_rating=course.reviews.aggregate(Avg('rating'))['rating__avg'] or 0,
-            created_at=course.created_at
-        ))
-    
+        result.append(
+            schemas.CourseOutput(
+                id=course.id,
+                title=course.title,
+                slug=course.slug,
+                description=course.description,
+                short_description=course.short_description or '',
+                thumbnail=course.thumbnail.url if course.thumbnail else None,
+                instructor=schemas.InstructorOutput(
+                    id=course.instructor.id,
+                    username=course.instructor.username,
+                    first_name=course.instructor.first_name,
+                    last_name=course.instructor.last_name
+                ),
+                category_id=course.category.id if course.category else None,
+                category_name=course.category.name if course.category else None,
+                level=course.level,
+                price=course.price,
+                is_published=course.is_published,
+                is_featured=course.is_featured,
+                duration_hours=course.duration_hours,
+                lessons_count=course.lessons.count(),
+                students_enrolled=course.enrollments.filter(
+                    is_active=True
+                ).count(),
+                average_rating=course.reviews.aggregate(
+                    Avg('rating')
+                )['rating__avg'] or 0,
+                created_at=course.created_at
+            )
+        )
+
+    cache.set(
+        cache_key,
+        result,
+        timeout=300
+    )
+
     return result
 
 @api.get("/courses/{course_id}", response=schemas.CourseDetailOutput)
 def get_course(request, course_id: int):
     """Get course detail with lessons"""
+
+    cache_key = f"course_{course_id}"
+
+    cached = cache.get(cache_key)
+
+    if cached:
+        return cached
     course = get_object_or_404(Course.objects.select_related('category', 'instructor'), id=course_id, is_published=True)
     
     # Check if user is enrolled
@@ -231,7 +278,7 @@ def get_course(request, course_id: int):
     elif request.user.is_authenticated and request.user.role != 'instructor' and not is_enrolled:
         lessons = lessons.filter(is_preview=True)
     
-    return schemas.CourseDetailOutput(
+    response = schemas.CourseDetailOutput(
         id=course.id,
         title=course.title,
         slug=course.slug,
@@ -267,6 +314,13 @@ def get_course(request, course_id: int):
         ]
     )
 
+    cache.set(
+        cache_key,
+        response,
+        timeout=300
+    )
+
+    return response
 @api.post("/courses", auth=jwt_auth, response={201: schemas.CourseOutput, 401: schemas.ErrorOutput, 403: schemas.ErrorOutput})
 def create_course(request, payload: schemas.CourseInput):
     """Create new course (Instructor/Admin only)"""
@@ -291,7 +345,10 @@ def create_course(request, payload: schemas.CourseInput):
         is_featured=payload.is_featured,
         duration_hours=payload.duration_hours
     )
-    
+
+    cache.delete("course_list")
+    cache.delete(f"course_{course.id}")
+
     return 201, schemas.CourseOutput(
         id=course.id,
         title=course.title,
@@ -348,6 +405,9 @@ def update_course(request, course_id: int, payload: schemas.CourseUpdateInput):
         course.duration_hours = payload.duration_hours
     
     course.save()
+
+    cache.delete("course_list")
+    cache.delete(f"course_{course.id}")
     
     return 200, schemas.CourseOutput(
         id=course.id,
@@ -383,6 +443,10 @@ def delete_course(request, course_id: int):
         return 403, {"error": "Only admin can delete courses"}
     
     course = get_object_or_404(Course, id=course_id)
+
+    cache.delete("course_list")
+    cache.delete(f"course_{course.id}")
+
     course.delete()
     
     return 200, {"message": "Course deleted successfully"}
@@ -405,6 +469,20 @@ def enroll_course(request, payload: schemas.EnrollmentInput):
         student=request.user,
         course=course,
         is_active=True
+    )
+
+    activity_logs.insert_one({
+        "user_id": request.user.id,
+        "username": request.user.username,
+        "activity": "course_enrollment",
+        "course_id": course.id,
+        "course_title": course.title,
+        "timestamp": datetime.utcnow()
+    })
+
+    send_enrollment_email.delay(
+        request.user.username,
+        course.title
     )
     
     total_lessons = course.lessons.count()
@@ -472,7 +550,13 @@ def mark_lesson_complete(request, enrollment_id: int, payload: schemas.ProgressI
         completed_lessons = enrollment.progress.filter(is_completed=True).count()
         
         if completed_lessons == total_lessons:
+
             enrollment.complete()
+
+            generate_certificate.delay(
+                request.user.username,
+                enrollment.course.title
+            )
     
     return 200, schemas.ProgressOutput(
         lesson_id=lesson.id,

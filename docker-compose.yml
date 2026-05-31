@@ -1,4 +1,5 @@
 services:
+
   db:
     image: postgres:15-alpine
     container_name: simple-lms-db
@@ -9,40 +10,86 @@ services:
       POSTGRES_PASSWORD: ${DB_PASSWORD}
     volumes:
       - postgres_data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    container_name: simple-lms-redis
+    restart: always
     ports:
-      - "5432:5432"
-    networks:
-      - lms_network
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_NAME}"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
+      - "6379:6379"
+
+  mongodb:
+    image: mongo:7
+    container_name: simple-lms-mongo
+    restart: always
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: simple-lms-rabbitmq
+    restart: always
+    ports:
+      - "5672:5672"
+      - "15672:15672"
 
   web:
     build: .
     container_name: simple-lms-web
-    restart: unless-stopped
     command: python manage.py runserver 0.0.0.0:8000
     volumes:
       - .:/app
-      - static_volume:/app/staticfiles
-      - media_volume:/app/media
     ports:
       - "8000:8000"
-    depends_on:
-      db:
-        condition: service_healthy
     env_file:
       - .env
-    networks:
-      - lms_network
+    depends_on:
+      - db
+      - redis
+      - mongodb
+      - rabbitmq
+
+  celery-worker:
+    build: .
+    container_name: simple-lms-celery-worker
+    command: celery -A config worker -l info
+    volumes:
+      - .:/app
+    env_file:
+      - .env
+    depends_on:
+      - rabbitmq
+      - redis
+
+  celery-beat:
+    build: .
+    container_name: simple-lms-celery-beat
+    command: celery -A config beat -l info
+    volumes:
+      - .:/app
+    env_file:
+      - .env
+    depends_on:
+      - rabbitmq
+      - redis
+
+  flower:
+    build: .
+    container_name: simple-lms-flower
+    command: celery -A config flower
+    ports:
+      - "5555:5555"
+    volumes:
+      - .:/app
+    depends_on:
+      - rabbitmq
 
 volumes:
   postgres_data:
-  static_volume:
-  media_volume:
+  mongo_data:
 
 networks:
-  lms_network:
+  default:
     driver: bridge
