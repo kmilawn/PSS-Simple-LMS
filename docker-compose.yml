@@ -78,7 +78,7 @@ services:
   flower:
     build: .
     container_name: simple-lms-flower
-    command: celery -A config flower
+    command: celery --app=config flower
     ports:
       - "5555:5555"
     volumes:

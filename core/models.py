@@ -1,8 +1,7 @@
 from django.db import models
 from django.contrib.auth.models import AbstractUser
 from django.core.validators import MinValueValidator, MaxValueValidator
-from django.db.models import Q, Count, Avg, F, Value, Case, When
-from django.db.models.query import QuerySet
+from django.db.models import Q, Count, Avg
 from django.utils import timezone
 
 # ==================== CUSTOM QUERYSET & MANAGER ====================

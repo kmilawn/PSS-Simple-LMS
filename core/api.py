@@ -8,18 +8,11 @@ from django.db.models import Count, Avg, Q
 from typing import List, Optional
 from datetime import datetime
 from django.core.cache import cache
+from django.utils.text import slugify
 
-from .mongodb import (
-    activity_logs,
-    learning_analytics
-)
-
-from .tasks import (
-    send_enrollment_email,
-    generate_certificate
-)
 from . import schemas
 from .models import User, Category, Course, Lesson, Enrollment, Progress
+from .tasks import send_enrollment_email, generate_certificate
 
 User = get_user_model()
 
@@ -37,21 +30,52 @@ jwt_auth = JWTAuth()
 
 # ==================== HELPER FUNCTIONS ====================
 
+def get_real_user(user):
+    """Get actual User object from request.user"""
+    try:
+        if hasattr(user, 'id') and user.id:
+            return User.objects.get(id=user.id)
+        return None
+    except (User.DoesNotExist, AttributeError):
+        return None
+
 def is_admin(user):
-    return user.is_authenticated and (user.role == 'admin' or user.is_superuser)
+    """Check if user is admin"""
+    if not user or not user.is_authenticated:
+        return False
+    real_user = get_real_user(user)
+    if not real_user:
+        return False
+    return real_user.role == "admin" or real_user.is_superuser
 
 def is_instructor(user):
-    return user.is_authenticated and (user.role == 'instructor' or user.role == 'admin')
+    """Check if user is instructor or admin"""
+    if not user or not user.is_authenticated:
+        return False
+    real_user = get_real_user(user)
+    if not real_user:
+        return False
+    return real_user.role == "instructor" or real_user.role == "admin"
 
 def is_student(user):
-    return user.is_authenticated and (user.role == 'student')
+    """Check if user is student"""
+    if not user or not user.is_authenticated:
+        return False
+    real_user = get_real_user(user)
+    if not real_user:
+        return False
+    return real_user.role == "student"
 
 def is_owner_or_admin(course, user):
-    if not user.is_authenticated:
+    """Check if user is course owner or admin"""
+    if not user or not user.is_authenticated:
         return False
-    if user.role == 'admin' or user.is_superuser:
+    real_user = get_real_user(user)
+    if not real_user:
+        return False
+    if real_user.role == "admin" or real_user.is_superuser:
         return True
-    return course.instructor_id == user.id
+    return course.instructor_id == real_user.id
 
 # ==================== AUTH ENDPOINTS ====================
 
@@ -106,15 +130,14 @@ def login(request, payload: schemas.LoginInput):
     }
 
 @api.post("/auth/refresh", response={200: dict, 401: schemas.ErrorOutput})
-def refresh_token(request, payload: dict):
+def refresh_token(request, payload: schemas.RefreshInput):
     """Refresh access token"""
     
-    refresh_token = payload.get("refresh")
-    if not refresh_token:
+    if not payload.refresh:
         return 401, {"error": "Refresh token required"}
     
     try:
-        refresh = RefreshToken(refresh_token)
+        refresh = RefreshToken(payload.refresh)
         return 200, {"access": str(refresh.access_token)}
     except Exception:
         return 401, {"error": "Invalid refresh token"}
@@ -122,7 +145,11 @@ def refresh_token(request, payload: dict):
 @api.get("/auth/me", auth=jwt_auth, response={200: schemas.UserOutput, 401: schemas.ErrorOutput})
 def get_me(request):
     """Get current user info"""
-    user = request.user
+    try:
+        user = User.objects.get(id=request.user.id)
+    except User.DoesNotExist:
+        return 401, {"error": "User not found"}
+    
     return 200, schemas.UserOutput(
         id=user.id,
         username=user.username,
@@ -138,7 +165,11 @@ def get_me(request):
 @api.put("/auth/me", auth=jwt_auth, response={200: schemas.UserOutput, 401: schemas.ErrorOutput})
 def update_me(request, payload: schemas.UserUpdateInput):
     """Update current user profile"""
-    user = request.user
+    try:
+        user = User.objects.get(id=request.user.id)
+    except User.DoesNotExist:
+        return 401, {"error": "User not found"}
+    
     if payload.first_name is not None:
         user.first_name = payload.first_name
     if payload.last_name is not None:
@@ -174,93 +205,86 @@ def list_courses(
     search: Optional[str] = None,
     featured: Optional[bool] = None
 ):
-    """
-    List all published courses with Redis Cache
-    """
-
+    """List all published courses with filters"""
+    
+    # Build cache key
     cache_key = f"course_list_{category_id}_{level}_{search}_{featured}"
+    
+    print(f"🔍 Cache key: {cache_key}")
 
     cached_data = cache.get(cache_key)
-
+    
     if cached_data:
+        print(f"✅ Cache HIT for {cache_key}")
         return cached_data
-
-    courses = Course.objects.filter(
-        is_published=True
-    ).select_related(
-        'category',
-        'instructor'
-    )
-
+    else:
+        print(f"❌ Cache MISS for {cache_key}")
+    
+    courses = Course.objects.filter(is_published=True).select_related('category', 'instructor')
+    
     if category_id:
         courses = courses.filter(category_id=category_id)
-
+    
     if level:
         courses = courses.filter(level=level)
-
+    
     if featured:
         courses = courses.filter(is_featured=True)
-
+    
     if search:
         courses = courses.filter(
             Q(title__icontains=search) |
             Q(description__icontains=search)
         )
-
+    
     result = []
-
     for course in courses[:50]:
-        result.append(
-            schemas.CourseOutput(
-                id=course.id,
-                title=course.title,
-                slug=course.slug,
-                description=course.description,
-                short_description=course.short_description or '',
-                thumbnail=course.thumbnail.url if course.thumbnail else None,
-                instructor=schemas.InstructorOutput(
-                    id=course.instructor.id,
-                    username=course.instructor.username,
-                    first_name=course.instructor.first_name,
-                    last_name=course.instructor.last_name
-                ),
-                category_id=course.category.id if course.category else None,
-                category_name=course.category.name if course.category else None,
-                level=course.level,
-                price=course.price,
-                is_published=course.is_published,
-                is_featured=course.is_featured,
-                duration_hours=course.duration_hours,
-                lessons_count=course.lessons.count(),
-                students_enrolled=course.enrollments.filter(
-                    is_active=True
-                ).count(),
-                average_rating=course.reviews.aggregate(
-                    Avg('rating')
-                )['rating__avg'] or 0,
-                created_at=course.created_at
-            )
-        )
-
-    cache.set(
-        cache_key,
-        result,
-        timeout=300
-    )
-
+        result.append(schemas.CourseOutput(
+            id=course.id,
+            title=course.title,
+            slug=course.slug,
+            description=course.description,
+            short_description=course.short_description or '',
+            thumbnail=course.thumbnail.url if course.thumbnail else None,
+            instructor=schemas.InstructorOutput(
+                id=course.instructor.id,
+                username=course.instructor.username,
+                first_name=course.instructor.first_name,
+                last_name=course.instructor.last_name
+            ),
+            category_id=course.category.id if course.category else None,
+            category_name=course.category.name if course.category else None,
+            level=course.level,
+            price=course.price,
+            is_published=course.is_published,
+            is_featured=course.is_featured,
+            duration_hours=course.duration_hours,
+            lessons_count=course.lessons.count(),
+            students_enrolled=course.enrollments.filter(is_active=True).count(),
+            average_rating=course.reviews.aggregate(Avg('rating'))['rating__avg'] or 0,
+            created_at=course.created_at
+        ))
+    
+    print(f"💾 Saving to cache: {cache_key}")
+    cache.set(cache_key, result, timeout=300)
+    
     return result
 
 @api.get("/courses/{course_id}", response=schemas.CourseDetailOutput)
 def get_course(request, course_id: int):
     """Get course detail with lessons"""
-
+    
     cache_key = f"course_{course_id}"
-
     cached = cache.get(cache_key)
-
+    
     if cached:
         return cached
-    course = get_object_or_404(Course.objects.select_related('category', 'instructor'), id=course_id, is_published=True)
+    
+    course = get_object_or_404(
+        Course.objects.select_related('category', 'instructor'), 
+        id=course_id, 
+        is_published=True
+    )
     
     # Check if user is enrolled
     is_enrolled = False
@@ -275,8 +299,10 @@ def get_course(request, course_id: int):
     lessons = course.lessons.all()
     if not request.user.is_authenticated:
         lessons = lessons.filter(is_preview=True)
-    elif request.user.is_authenticated and request.user.role != 'instructor' and not is_enrolled:
-        lessons = lessons.filter(is_preview=True)
+    elif request.user.is_authenticated and not is_enrolled:
+        user = User.objects.get(id=request.user.id)
+        if user.role != 'instructor':
+            lessons = lessons.filter(is_preview=True)
     
     response = schemas.CourseDetailOutput(
         id=course.id,
@@ -313,19 +339,21 @@ def get_course(request, course_id: int):
             ) for l in lessons
         ]
     )
-
-    cache.set(
-        cache_key,
-        response,
-        timeout=300
-    )
-
+    
+    cache.set(cache_key, response, timeout=300)
+    
     return response
+
 @api.post("/courses", auth=jwt_auth, response={201: schemas.CourseOutput, 401: schemas.ErrorOutput, 403: schemas.ErrorOutput})
 def create_course(request, payload: schemas.CourseInput):
     """Create new course (Instructor/Admin only)"""
     
-    if not is_instructor(request.user):
+    if not request.user.is_authenticated:
+        return 401, {"error": "Not authenticated"}
+    
+    real_user = User.objects.get(id=request.user.id)
+    
+    if not is_instructor(real_user):
         return 403, {"error": "Only instructors can create courses"}
     
     category = None
@@ -334,10 +362,10 @@ def create_course(request, payload: schemas.CourseInput):
     
     course = Course.objects.create(
         title=payload.title,
-        slug=payload.title.lower().replace(' ', '-'),
+        slug=slugify(payload.title),
         description=payload.description,
         short_description=payload.short_description or '',
-        instructor=request.user,
+        instructor=real_user,
         category=category,
         level=payload.level,
         price=payload.price,
@@ -345,10 +373,10 @@ def create_course(request, payload: schemas.CourseInput):
         is_featured=payload.is_featured,
         duration_hours=payload.duration_hours
     )
-
-    cache.delete("course_list")
-    cache.delete(f"course_{course.id}")
-
+    
+    # Clear cache
+    cache.clear()
+    
     return 201, schemas.CourseOutput(
         id=course.id,
         title=course.title,
@@ -379,14 +407,18 @@ def create_course(request, payload: schemas.CourseInput):
 def update_course(request, course_id: int, payload: schemas.CourseUpdateInput):
     """Update course (Owner only)"""
     
-    course = get_object_or_404(Course, id=course_id)
+    if not request.user.is_authenticated:
+        return 401, {"error": "Not authenticated"}
     
-    if not is_owner_or_admin(course, request.user):
+    course = get_object_or_404(Course, id=course_id)
+    real_user = User.objects.get(id=request.user.id)
+    
+    if not is_owner_or_admin(course, real_user):
         return 403, {"error": "You don't have permission to edit this course"}
     
     if payload.title is not None:
         course.title = payload.title
-        course.slug = payload.title.lower().replace(' ', '-')
+        course.slug = slugify(payload.title)
     if payload.description is not None:
         course.description = payload.description
     if payload.short_description is not None:
@@ -405,9 +437,9 @@ def update_course(request, course_id: int, payload: schemas.CourseUpdateInput):
         course.duration_hours = payload.duration_hours
     
     course.save()
-
-    cache.delete("course_list")
-    cache.delete(f"course_{course.id}")
+    
+    # Clear cache
+    cache.clear()
     
     return 200, schemas.CourseOutput(
         id=course.id,
@@ -439,14 +471,19 @@ def update_course(request, course_id: int, payload: schemas.CourseUpdateInput):
 def delete_course(request, course_id: int):
     """Delete course (Admin only)"""
     
-    if not is_admin(request.user):
+    if not request.user.is_authenticated:
+        return 401, {"error": "Not authenticated"}
+    
+    real_user = User.objects.get(id=request.user.id)
+    
+    if not is_admin(real_user):
         return 403, {"error": "Only admin can delete courses"}
     
     course = get_object_or_404(Course, id=course_id)
-
-    cache.delete("course_list")
-    cache.delete(f"course_{course.id}")
-
+    
+    # Clear cache
+    cache.clear()
+    
     course.delete()
     
     return 200, {"message": "Course deleted successfully"}
@@ -457,33 +494,27 @@ def delete_course(request, course_id: int):
 def enroll_course(request, payload: schemas.EnrollmentInput):
     """Enroll to a course (Student only)"""
     
-    if not is_student(request.user):
+    if not request.user.is_authenticated:
+        return 401, {"error": "Not authenticated"}
+    
+    real_user = User.objects.get(id=request.user.id)
+    
+    if not is_student(real_user):
         return 403, {"error": "Only students can enroll to courses"}
     
     course = get_object_or_404(Course, id=payload.course_id, is_published=True)
     
-    if Enrollment.objects.filter(student=request.user, course=course).exists():
+    if Enrollment.objects.filter(student=real_user, course=course).exists():
         return 400, {"error": "Already enrolled in this course"}
     
     enrollment = Enrollment.objects.create(
-        student=request.user,
+        student=real_user,
         course=course,
         is_active=True
     )
 
-    activity_logs.insert_one({
-        "user_id": request.user.id,
-        "username": request.user.username,
-        "activity": "course_enrollment",
-        "course_id": course.id,
-        "course_title": course.title,
-        "timestamp": datetime.utcnow()
-    })
-
-    send_enrollment_email.delay(
-        request.user.username,
-        course.title
-    )
+    # Trigger email async
+    send_enrollment_email.delay(real_user.username, course.title)
     
     total_lessons = course.lessons.count()
     
@@ -504,7 +535,12 @@ def enroll_course(request, payload: schemas.EnrollmentInput):
 def my_courses(request):
     """Get current user's enrolled courses with progress"""
     
-    enrollments = Enrollment.objects.filter(student=request.user, is_active=True).select_related('course', 'course__instructor')
+    if not request.user.is_authenticated:
+        return []
+    
+    real_user = User.objects.get(id=request.user.id)
+    
+    enrollments = Enrollment.objects.filter(student=real_user, is_active=True).select_related('course', 'course__instructor')
     
     result = []
     for enrollment in enrollments:
@@ -531,7 +567,12 @@ def my_courses(request):
 def mark_lesson_complete(request, enrollment_id: int, payload: schemas.ProgressInput):
     """Mark a lesson as complete for an enrollment"""
     
-    enrollment = get_object_or_404(Enrollment, id=enrollment_id, student=request.user)
+    if not request.user.is_authenticated:
+        return 401, {"error": "Not authenticated"}
+    
+    real_user = User.objects.get(id=request.user.id)
+    
+    enrollment = get_object_or_404(Enrollment, id=enrollment_id, student=real_user)
     lesson = get_object_or_404(Lesson, id=payload.lesson_id, course=enrollment.course)
     
     progress, created = Progress.objects.get_or_create(
@@ -550,13 +591,9 @@ def mark_lesson_complete(request, enrollment_id: int, payload: schemas.ProgressI
         completed_lessons = enrollment.progress.filter(is_completed=True).count()
         
         if completed_lessons == total_lessons:
-
             enrollment.complete()
-
-            generate_certificate.delay(
-                request.user.username,
-                enrollment.course.title
-            )
+            from .tasks import generate_certificate
+            generate_certificate.delay(real_user.username, enrollment.course.title)
     
     return 200, schemas.ProgressOutput(
         lesson_id=lesson.id,

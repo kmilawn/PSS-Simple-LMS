@@ -19,3 +19,26 @@ cp .env.example .env
 
 <img width="1920" height="1008" alt="image" src="https://github.com/user-attachments/assets/1058d4e1-b4e8-4aa3-9e93-3eeb1337cdc7" />
 
+## Cara Menjalankan
+
+docker compose up -d
+
+## Migration
+
+docker exec -it simple-lms-web python manage.py migrate
+
+## Swagger
+
+http://localhost:8000/api/docs
+
+## Flower
+
+http://localhost:5555
+
+## MongoDB
+
+docker exec -it simple-lms-mongo mongosh
+
+## Redis
+
+docker exec -it simple-lms-redis redis-cli
